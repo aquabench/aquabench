@@ -1,6 +1,6 @@
 # AQUABENCH
 
-**Vision foundation models for underwater semantic segmentation — ready to run.**
+**A benchmark of vision foundation models for underwater semantic segmentation.**
 
 AQUABENCH evaluates pretrained image encoders as frozen (and optionally fine-tuned)
 feature extractors for dense prediction on underwater imagery, across a unified
@@ -8,8 +8,8 @@ collection of **9 underwater segmentation datasets**. Everything runs through a 
 [Lightning](https://lightning.ai/) CLI — pick an **encoder × head × task × dataset** and
 go.
 
-The design is factored into four orthogonal axes so any encoder can be compared under an
-identical training/evaluation protocol:
+The design is deliberately factored into four orthogonal axes so that any encoder can be
+compared under an identical training/evaluation protocol:
 
 | Axis | Flag | What it selects |
 |---|---|---|
@@ -18,11 +18,11 @@ identical training/evaluation protocol:
 | **Task** | `--task` | the objective + metric (`semantic_seg`) |
 | **Dataset** | `--ds` | which underwater dataset config to load |
 
-> **This is the lean, out-of-the-box version** — just what you need to train, evaluate,
-> and run the models. To reproduce the paper's tables and figures (rankings, Kendall-τ,
-> critical-difference diagrams, confidence intervals, quality-tier analysis), check out
-> the [**`camera-ready` branch**](../../tree/camera-ready), which adds the `analysis/`
-> and `helpers/` pipelines.
+> **Note** — This is the camera-ready code release. It contains everything needed to
+> **train, evaluate, and reproduce the paper's tables and figures**. Cluster-specific
+> job-submission scripts (SLURM) have been removed; the equivalent sweeps are documented
+> below as plain shell loops so they run on any machine. For a leaner, model-only install
+> (no reproduction pipeline), see the [**`main`** branch](../../tree/main).
 
 ---
 
@@ -36,7 +36,7 @@ identical training/evaluation protocol:
 - [Heads and tasks](#heads-and-tasks)
 - [Logging and metrics](#logging-and-metrics)
 - [sklearn probe (fast sibling)](#sklearn-probe-fast-sibling)
-- [Verify your install](#verify-your-install)
+- [Reproducing the paper](#reproducing-the-paper)
 - [Repository layout](#repository-layout)
 - [Citation](#citation)
 - [License](#license)
@@ -117,6 +117,11 @@ list); it defaults to the last layer for `linear` and 4 evenly-spaced layers for
 UPerNet heads. `num_classes`, `img_size`, and ignore indices are read from the dataset
 metadata automatically and linked into the model.
 
+The paper's **model roster** is 5 encoder families × 2 tiers — a ViT-B tier
+(`dinov3_base`, `franca_base`, `radio_v3_base`, `eva02_base`, `vjepa21_vitb`) and a
+largest-per-family tier (`dinov3_7b`, `franca_giant`, `radio_v4_h`, `eva02_large`,
+`vjepa21_vitg`) — plus a supervised **ResNet-50** reference.
+
 ## Quickstart
 
 ```bash
@@ -156,8 +161,8 @@ whether the encoder is frozen:
 
 | `--head` | Encoder | Decoder | Role |
 |---|---|---|---|
-| `linear` | frozen | 1×1 conv on the last feature map | linear probing |
-| `upernet_frozen` | frozen | UPerNet (4 levels) | frozen features, trained decoder |
+| `linear` | frozen | 1×1 conv on the last feature map | benchmark primary (linear probing) |
+| `upernet_frozen` | frozen | UPerNet (4 levels) | benchmark secondary (frozen features, trained decoder) |
 | `upernet` | trainable | UPerNet (4 levels) | full end-to-end fine-tuning |
 
 The default freeze policy comes from the head but can be overridden with
@@ -171,7 +176,10 @@ The Lightning logger is swappable via `--trainer.logger` (CSV by default; point 
 logs per-class IoU at validation/test epoch end and best-effort sample predictions.
 
 **mIoU is logged twice:** `val/miou` excludes the background class (the headline number)
-and `val/miou_all` includes background as a class — same for `test/`.
+and `val/miou_all` includes background as a class — same for `test/`. Every `test` run
+also appends a row to `results/analysis/summary.csv` (`ds, backbone, head, seed,
+test_miou, test_miou_all`), which is the logger-independent record the analysis pipeline
+reads.
 
 ## sklearn probe (fast sibling)
 
@@ -188,16 +196,80 @@ resolution → `results/`. Reports mIoU with and without background. Embeddings 
 `--sklearn-max-train` rows in, and val/test are scored by streaming a confusion matrix.
 The cache is deleted afterwards unless `--keep-cache`.
 
-## Verify your install
+## Reproducing the paper
 
-A standalone smoke test loads a V-JEPA 2.1 backbone and runs the full frozen-backbone
-linear-probe path on a dummy batch — a quick way to confirm your environment works
-without touching the dataset:
+The full benchmark is a sweep over **encoder × dataset × seed** for each protocol,
+followed by an analysis pipeline that turns the collected results into the paper's tables
+and figures. Seeds used in the paper:
+
+- **Linear probing** — 5 seeds: `42 851 634 913 1627`
+- **UPerNet (frozen and fine-tuned)** — 3 seeds: `42 634 1627`
+
+### 1. Train + evaluate the sweep
+
+Example — the ViT-B linear-probing group (5 encoders × 9 datasets × 5 seeds). Run the
+analogous loops for the largest-per-family encoders and for the `upernet_frozen` /
+`upernet` heads (3 seeds), and a `resnet50` / `upernet` group as the supervised reference:
 
 ```bash
-python scripts/smoke_vjepa.py                      # lightweight ViT-B (fast)
-python scripts/smoke_vjepa.py --encoder vjepa21_vitg   # the 2B ViT-G (large download)
+export DATA_ROOT=/path/to/data
+DATASETS="cs cou df l4s liaci sc suim tc uiis10k"
+VITB="dinov3_base franca_base radio_v3_base eva02_base vjepa21_vitb"
+
+for ds in $DATASETS; do
+  for enc in $VITB; do
+    for seed in 42 851 634 913 1627; do
+      # 1. Train — best/last checkpoints land under logs/linear/<run>/checkpoints/
+      python -m aquabench.cli fit  --config configs/linear.yaml --encoder $enc --ds $ds --seed_everything $seed
+
+      # 2. Evaluate the run's best checkpoint on the test split
+      ckpt=$(find logs/linear -path '*checkpoints*' -name 'miou=*.ckpt' -printf '%T@ %p\n' \
+             | sort -nr | head -1 | cut -d' ' -f2-)
+      python -m aquabench.cli test --config configs/linear.yaml --encoder $enc --ds $ds --seed_everything $seed \
+             --ckpt_path "$ckpt"
+    done
+  done
+done
 ```
+
+The `best-{epoch}-{val/miou}` checkpoint template contains a `/` (from the `val/miou`
+metric name), so Lightning saves it as `.../checkpoints/best-epoch=NN-val/miou=X.ckpt`;
+the `find` above matches that nested `miou=*.ckpt` file and picks the most recent, i.e.
+the run that just finished. Each `test` invocation appends a row to
+`results/analysis/summary.csv` (see [Logging and metrics](#logging-and-metrics)), so the
+sweep's results accumulate there regardless of which logger is active.
+
+### 2. Collect, rank, and render
+
+```bash
+# Aggregate every test run into one results table
+python -m analysis.collect_results
+
+# Per-dataset rankings, Kendall-tau agreement, Kendall's W, Friedman/Nemenyi
+# critical-difference diagrams, and 95% confidence intervals
+python -m analysis.compute_rankings
+
+# Paper-ready CSV tables (mIoU +/- CI, wide format) and figures
+python -m analysis.make_result_tables
+python -m analysis.make_ranking_figures
+
+# UIQM image-quality-tier analysis + figure
+python -m analysis.quality_regime_analysis
+python -m analysis.make_quality_figures
+
+# Dataset statistics tables/figures (image stats, object-size distribution, sample grids)
+python -m analysis.dataset_summary
+python -m analysis.make_dataset_table
+python -m analysis.make_sample_figures
+
+# LaTeX tables for the paper (mIoU +/- CI, ranking tables)
+python helpers/generate_latex_tables.py iou   results/tables/table_vitb_linear_miou_ci.csv
+python helpers/generate_latex_tables.py rank   results/rankings_vitb_linear_with_resnet.csv
+```
+
+Most analysis scripts accept `--help` and read their inputs from `results/` (overridable
+via `--input-dir` / `--output-dir`). Figures are written to `results/analysis/figures/`
+as `.pdf` and `.svg`.
 
 ## Repository layout
 
@@ -227,6 +299,8 @@ aquabench/
     augment.py       # kornia presets (none/light/medium/heavy)
     tokens.py        # token-grid helpers
 configs/             # composable Lightning CLI configs
+analysis/            # results aggregation, rankings, statistics, figures
+helpers/             # LaTeX table generation
 scripts/             # standalone smoke test (V-JEPA backbone)
 ```
 
