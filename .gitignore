@@ -1,0 +1,25 @@
+# logs
+logs/
+
+# model checkpoints (downloaded at runtime, not tracked)
+checkpoints/
+
+# generated analysis outputs (CSVs, figures) -- pull these to your local machine instead
+results/
+results_aqb_*/
+
+# python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+
+# pycharm
+.idea/
+
+# venv
+.venv/
+venv/

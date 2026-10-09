@@ -1,0 +1,11 @@
+# Compose over any existing config to enable W&B logging.
+# Run name is auto-set to {ds}_{encoder}_{head}_{task}_{seed} by BenchCLI.
+#
+# Usage:
+#   python -m aquabench.cli fit --config configs/default.yaml --config configs/wandb.yaml --encoder dinov3_base ...
+trainer:
+  logger:
+    class_path: lightning.pytorch.loggers.WandbLogger
+    init_args:
+      project: aquabench
+      log_model: false

@@ -1,0 +1,50 @@
+# Defaults shared by runs. Override any axis on the CLI, e.g.
+#   python -m aquabench.cli fit --config configs/default.yaml --encoder dinov3_large --head upernet --ds suim
+seed_everything: 42
+
+encoder: dinov3_base
+head: linear
+task: semantic_seg
+ds: cou
+
+model:
+  lr: 1.0e-3
+  weight_decay: 1.0e-4
+  scheduler: cosine
+  # freeze_encoder: null  -> use the head default (linear: frozen, upernet: trainable)
+  # out_indices: null     -> auto (last layer for linear; 4 evenly-spaced for upernet)
+
+data:
+  # data_dir defaults to $DATA_ROOT/unified (see aquabench/data); override here or with --data.data_dir.
+  batch_size: 8
+  num_workers: 8
+  augmentation: medium
+
+trainer:
+  max_epochs: 20
+  accelerator: gpu
+  devices: 1
+  precision: bf16-mixed
+  log_every_n_steps: 10
+  default_root_dir: logs
+  logger:                       # swap for WandbLogger / TensorBoardLogger here
+    class_path: lightning.pytorch.loggers.CSVLogger
+    init_args:
+      save_dir: logs
+  callbacks:
+    - class_path: lightning.pytorch.callbacks.ModelCheckpoint
+      init_args:
+        monitor: val/miou
+        mode: max
+        save_top_k: 1
+        filename: "best-{epoch:02d}-{val/miou:.4f}"
+    - class_path: lightning.pytorch.callbacks.ModelCheckpoint
+      init_args:
+        save_last: true
+        filename: "last"
+    - class_path: lightning.pytorch.callbacks.ModelCheckpoint
+      init_args:
+        monitor: val/miou_all
+        mode: max
+        save_top_k: 1
+        filename: "bestall-{epoch:02d}"

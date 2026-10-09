@@ -1,0 +1,43 @@
+# UperNet decoder on a (trainable) encoder, 100 epochs.
+#   python -m aquabench.cli fit --config configs/upernet.yaml --encoder dinov3_base --ds cou
+#   python -m aquabench.cli fit --config configs/upernet.yaml --encoder resnet50  --ds cou
+seed_everything: 42
+encoder: dinov3_base
+head: upernet
+task: semantic_seg
+ds: cou
+model:
+  lr: 1.0e-4
+  weight_decay: 1.0e-4
+  scheduler: cosine
+data:
+  # data_dir defaults to $DATA_ROOT/unified (see aquabench/data); override here or with --data.data_dir.
+  batch_size: 32
+  num_workers: 8
+  augmentation: medium
+trainer:
+  max_epochs: 50
+  accelerator: gpu
+  devices: 1
+  precision: bf16-mixed
+  default_root_dir: logs/upernet
+  logger:
+    class_path: lightning.pytorch.loggers.CSVLogger
+    init_args: {save_dir: logs/upernet}
+  callbacks:
+    - class_path: lightning.pytorch.callbacks.ModelCheckpoint
+      init_args:
+        monitor: val/miou
+        mode: max
+        save_top_k: 1
+        filename: "best-{epoch:02d}-{val/miou:.4f}"
+    - class_path: lightning.pytorch.callbacks.ModelCheckpoint
+      init_args:
+        save_last: true
+        filename: "last"
+    - class_path: lightning.pytorch.callbacks.ModelCheckpoint
+      init_args:
+        monitor: val/miou_all
+        mode: max
+        save_top_k: 1
+        filename: "bestall-{epoch:02d}"
