@@ -1,238 +1,187 @@
 # AQUABENCH
 
-**Vision foundation models for underwater semantic segmentation — ready to run.**
+**Underwater semantic segmentation benchmark for vision encoders. Plain PyTorch.**
 
-AQUABENCH evaluates pretrained image encoders as frozen (and optionally fine-tuned)
-feature extractors for dense prediction on underwater imagery, across a unified
-collection of **9 underwater segmentation datasets**. Everything runs through a single
-[Lightning](https://lightning.ai/) CLI — pick an **encoder × head × task × dataset** and
-go.
+You prepare the encoder; AQUABENCH handles data, heads, the training loop and metrics
+across **9 underwater segmentation datasets**, under one fixed protocol.
 
-The design is factored into four orthogonal axes so any encoder can be compared under an
-identical training/evaluation protocol:
+```python
+import aquabench
 
-| Axis | Flag | What it selects |
-|---|---|---|
-| **Encoder** | `--encoder` | the pretrained backbone under test |
-| **Head** | `--head` | how backbone features become segmentation logits |
-| **Task** | `--task` | the objective + metric (`semantic_seg`) |
-| **Dataset** | `--ds` | which underwater dataset config to load |
+result = aquabench.run(
+    encoder,                     # your nn.Module, see "Encoder contract"
+    logger=logger,               # anything with .log(dict, step); default prints
+    run_type="linear",           # "linear" | "upernet_frozen" | "upernet_finetune"
+    seed=0,
+    data_root="/data/aquabench",
+    datasets="all",              # or "SUIM", or ["SUIM", "COU"]
+)
+result["SUIM"].test_miou         # all-class test mIoU (result.test_miou for a single dataset)
+```
 
-> **This is the lean, out-of-the-box version** — just what you need to train, evaluate,
-> and run the models. To reproduce the paper's tables and figures (rankings, Kendall-τ,
-> critical-difference diagrams, confidence intervals, quality-tier analysis), check out
-> the [**`camera-ready` branch**](../../tree/camera-ready), which adds the `analysis/`
-> and `helpers/` pipelines.
+One call = one encoder, one run type, one seed. Multi-seed and multi-model sweeps are
+your own scripts (see [`examples/dinov3_sweep.py`](examples/dinov3_sweep.py)).
 
----
-
-## Contents
-
-- [Installation](#installation)
-- [Dataset](#dataset)
-- [The four axes](#the-four-axes)
-- [Quickstart](#quickstart)
-- [Configs](#configs)
-- [Heads and tasks](#heads-and-tasks)
-- [Logging and metrics](#logging-and-metrics)
-- [sklearn probe (fast sibling)](#sklearn-probe-fast-sibling)
-- [Verify your install](#verify-your-install)
-- [Repository layout](#repository-layout)
-- [Citation](#citation)
-- [License](#license)
+> v1.1 is a lean rewrite of v1 (Lightning CLI + built-in model zoo). The v1 code is on
+> `main` / in the git history; the paper's analysis pipeline is on the `camera-ready` branch.
 
 ---
 
 ## Installation
 
-Python ≥ 3.10 and a CUDA-capable GPU are recommended. Using
-[uv](https://github.com/astral-sh/uv):
+```bash
+pip install -e .                 # core: torch, numpy, pillow only
+pip install -e '.[download]'     # + `datasets`, needed only for `aquabench download`
+pip install -e '.[test]'         # + pytest
+```
+
+## Data
 
 ```bash
-uv venv && source .venv/bin/activate
-uv pip install -e .
+aquabench download --data-root /data/aquabench                        # all datasets
+aquabench download --data-root /data/aquabench --datasets SUIM COU    # a subset
+aquabench verify   --data-root /data/aquabench                        # check layout and masks
 ```
 
-Or with plain pip:
-
-```bash
-python -m venv .venv && source .venv/bin/activate
-pip install -e .
-```
-
-This installs the `aquabench` package and the `aquabench` console script. Encoder weights
-(DINOv3, Franca, RADIO, EVA-02, V-JEPA 2.1) are downloaded on first use from their
-respective sources (HuggingFace Hub / `torch.hub` / official URLs) and cached locally.
-
-## Dataset
-
-AQUABENCH is trained and evaluated on a **unified** build of 9 underwater segmentation
-datasets, harmonised to a common on-disk layout so a single loader handles all of them.
-
-**1. Download the published dataset** from the project page:
-
-> **[aquabench.github.io](https://aquabench.github.io)**
-
-**2. Place it at `$DATA_ROOT/unified`** and point `DATA_ROOT` at it:
-
-```bash
-export DATA_ROOT=/path/to/data          # the loader reads $DATA_ROOT/unified
-```
-
-The loader (`aquabench/data`) expects the unified directory to contain, per dataset
-config, the split parquet files plus a metadata file it reads for `num_classes`,
-`img_size`, and the loss/metric ignore indices:
+`--source` takes the Hugging Face dataset repo or a local copy of the unified build
+(`<dir>/_metadata/<cfg>.json` + one parquet config per dataset). Download writes a plain
+layout that training reads with Pillow only:
 
 ```
-$DATA_ROOT/unified/
-  _metadata/
-    cou.json  suim.json  l4s.json  ...     # per-config metadata
-  <parquet data for each config/split>
+/data/aquabench/
+  SUIM/
+    meta.json             # {"num_classes", "ignore_index", "size": [H, W], "class_names"}
+    train/images/*.png  train/masks/*.png
+    val/images/...      val/masks/...
+    test/images/...     test/masks/...
+  COU/ ...
 ```
 
-Datasets are loaded by short config name via `datasets.load_dataset($DATA_ROOT/unified,
-<ds>)`. The 9 configs (short name → source dataset):
+Set `$AQUABENCH_DATA` to skip passing `data_root` to `run` / `evaluate`.
 
-| `--ds` | Dataset | | `--ds` | Dataset |
+| Dataset | short | | Dataset | short |
 |---|---|---|---|---|
-| `cs` | CoralScapes | | `sc` | SeaCLEAR |
-| `cou` | COU | | `suim` | SUIM |
-| `df` | DeepFish | | `tc` | TrashCan |
-| `l4s` | Looking for Seagrass (L4S) | | `uiis10k` | UIIS10K |
-| `liaci` | LIACi | | | |
+| CoralScapes | `cs` | | SeaClear | `sc` |
+| COU | `cou` | | SUIM | `suim` |
+| DeepFish | `df` | | TrashCan | `tc` |
+| L4S (Looking for Seagrass) | `l4s` | | UIIS10K | `uiis10k` |
+| LIACi | `liaci` | | | |
 
-## The four axes
+Names are case-insensitive; the v1 short names work too. Splits are frozen as shipped.
 
-Everything is a combination of the four flags.
+## Encoder contract
 
-| Axis | Flag | Choices |
-|---|---|---|
-| Encoder | `--encoder` | `dinov3_{small,base,large,7b}`, `franca_{base,large,giant}`, `radio_v3_{base,large}`, `radio_v4_{h,so400m}`, `eva02_{base,large}`, `vjepa21_{vitb,vitg}`, `resnet50`, `resnet101`, `dummy` |
-| Head | `--head` | `linear` (frozen encoder + 1×1 conv), `upernet_frozen` (frozen encoder + UPerNet decoder), `upernet` (full end-to-end fine-tuning) |
-| Task | `--task` | `semantic_seg` |
-| Dataset | `--ds` | `cs`, `cou`, `df`, `l4s`, `liaci`, `sc`, `suim`, `tc`, `uiis10k` |
+AQUABENCH does no encoder handling: no model zoo, no weight loading, no layer selection.
 
-`--out_indices` is generic (`last`, an int *N* for *N* evenly-spaced layers, or an explicit
-list); it defaults to the last layer for `linear` and 4 evenly-spaced layers for the
-UPerNet heads. `num_classes`, `img_size`, and ignore indices are read from the dataset
-metadata automatically and linked into the model.
-
-## Quickstart
-
-```bash
-export DATA_ROOT=/path/to/data
-
-# Linear probe: frozen DINOv3-B + 1x1 conv head on COU
-python -m aquabench.cli fit  --config configs/linear.yaml  --encoder dinov3_base --ds cou
-
-# Frozen-encoder UPerNet decoder on SUIM
-python -m aquabench.cli fit  --config configs/upernet.yaml --encoder dinov3_base --ds suim --head upernet_frozen
-
-# Fully fine-tuned UPerNet (encoder + decoder) with a ResNet-50 backbone
-python -m aquabench.cli fit  --config configs/upernet.yaml --encoder resnet50    --ds suim
-
-# Evaluate a trained checkpoint on the test split
-python -m aquabench.cli test --config configs/linear.yaml  --encoder dinov3_base --ds cou --ckpt_path <path/to/best.ckpt>
-```
-
-Any axis or trainer option can be overridden on the CLI, e.g.
-`--trainer.max_epochs 100`, `--data.batch_size 16`, `--seed_everything 634`.
-
-## Configs
-
-Reusable defaults live in `configs/` and are composed with `--config`:
-
-- `configs/default.yaml` — shared defaults (optimizer, augmentation, checkpoint callbacks).
-- `configs/linear.yaml` — linear-probe protocol (frozen encoder + 1×1 conv).
-- `configs/upernet.yaml` — UPerNet decoder protocol.
-- `configs/wandb.yaml` — compose on top of any config to switch the logger to
-  Weights & Biases: `--config configs/linear.yaml --config configs/wandb.yaml`.
-
-## Heads and tasks
-
-Heads return **logits only**; the **Task** owns the loss and metric (CrossEntropy + IoU
-for every head under `semantic_seg`). The three heads differ in what they attach and
-whether the encoder is frozen:
-
-| `--head` | Encoder | Decoder | Role |
+| run type | encoder | `encoder.forward(x)` must return | head |
 |---|---|---|---|
-| `linear` | frozen | 1×1 conv on the last feature map | linear probing |
-| `upernet_frozen` | frozen | UPerNet (4 levels) | frozen features, trained decoder |
-| `upernet` | trainable | UPerNet (4 levels) | full end-to-end fine-tuning |
+| `linear` | frozen | one tensor `[B, C, h, w]` | BatchNorm + 1×1 conv |
+| `upernet_frozen` | frozen | list of 4 tensors `[B, C_i, h_i, w_i]` | UPerNet (PPM + FPN) |
+| `upernet_finetune` | trained | list of 4 tensors `[B, C_i, h_i, w_i]` | UPerNet (PPM + FPN) |
 
-The default freeze policy comes from the head but can be overridden with
-`--model.freeze_encoder`. Augmentation presets are `none` / `light` / `medium` / `heavy`
-(`--data.augmentation`), applied on-device via [kornia](https://kornia.readthedocs.io/).
+The output is checked on a dummy image before training; a mismatch raises
+`aquabench.EncoderContractError` with a clear message. If the 4 maps all share one
+spatial size (plain ViT), the UPerNet head resizes them ×4, ×2, ×1, ×0.5 into a pyramid,
+as in v1; maps that already form a pyramid (CNNs) are used as they are.
 
-## Logging and metrics
-
-The Lightning logger is swappable via `--trainer.logger` (CSV by default; point at
-`WandbLogger` / `TensorBoardLogger` in a config). A `MetricsCallback` (added by default)
-logs per-class IoU at validation/test epoch end and best-effort sample predictions.
-
-**mIoU is logged twice:** `val/miou` excludes the background class (the headline number)
-and `val/miou_all` includes background as a class — same for `test/`.
-
-## sklearn probe (fast sibling)
-
-A lightweight, training-free alternative to the Lightning linear head:
-
-```bash
-python -m aquabench.probe --ds l4s --encoder dinov3_base
+```python
+class DINOv3Pyramid(nn.Module):
+    def __init__(self, m, layers=(2, 5, 8, 11)):
+        super().__init__(); self.m, self.layers = m, layers
+    def forward(self, x):
+        return list(self.m.get_intermediate_layers(x, n=self.layers, reshape=True, norm=True))
 ```
 
-Frozen encoder (last layer) → patch embeddings → `LogisticRegression` at patch
-resolution → `results/`. Reports mIoU with and without background. Embeddings are
-**streamed to disk** as per-batch shards under `--cache-dir` (default
-`results/probe_cache/<ds>__<encoder>/`) so they never all sit in RAM: fit pulls at most
-`--sklearn-max-train` rows in, and val/test are scored by streaming a confusion matrix.
-The cache is deleted afterwards unless `--keep-cache`.
+Inputs are ImageNet-normalized (set `"normalize": "none"` in the config to get `[0, 1]`).
+The run folder is named after `encoder_name=...`, else `encoder.name`, else the class name.
 
-## Verify your install
+## Protocol
 
-A standalone smoke test loads a V-JEPA 2.1 backbone and runs the full frozen-backbone
-linear-probe path on a dummy batch — a quick way to confirm your environment works
-without touching the dataset:
+- **Resolution.** Each dataset has a target size in `meta.json`, divisible by 16, with its
+  own aspect ratio. Token grid = size / 16. The encoder input is `grid × patch_size`
+  (`patch_size=16` by default; `14` gives a smaller input with the same token count).
+  Masks stay at the dataset size, so metrics are comparable across patch sizes.
+- **Training.** AdamW, cosine schedule, 50 epochs, effective batch 32
+  (`batch_size` 16 × `grad_accum_steps` 2), bf16 autocast. Learning rate 1e-3 for
+  `linear`, 1e-4 for both UPerNet run types.
+- **Augmentation.** Zoom-in only: random scale in [1.0, 1.5], random crop back to size,
+  random horizontal flip. No padding. Off for `linear` / `upernet_frozen`, on for
+  `upernet_finetune`; override with `augment=True/False`.
+- **Reported number.** Test mIoU over **all classes including background**, from the
+  **last epoch**. Val is only logged, never used for checkpoint selection.
+
+Defaults ship in [`aquabench/configs/`](aquabench/configs) (one JSON per run type).
+Override any key with a dict or a JSON file:
+
+```python
+aquabench.run(encoder, run_type="upernet_finetune", seed=0, patch_size=14,
+              config="my_finetune.json")          # or config={"batch_size": 8, "grad_accum_steps": 4}
+```
+
+## Outputs
+
+Each dataset gets its own run folder under `output_dir` (default `runs/`):
+
+```
+runs/<encoder_name>/<run_type>/<dataset>_seed<seed>/
+  config.json      # effective config
+  history.json     # per-epoch train loss and val mIoU
+  result.json      # test mIoU, per-class IoU, last val mIoU, runtime, version
+  checkpoint.pt    # head (+ encoder weights for upernet_finetune)
+```
+
+- `checkpoint_dir=...` puts only the checkpoints under another root (e.g. scratch).
+- `save_checkpoint=False` writes no checkpoint (large sweeps); `evaluate` is then not possible.
+
+Re-test a saved run without training. You pass the encoder; the checkpoint provides the
+head, and for `upernet_finetune` also the encoder weights. A warning is raised if a
+frozen encoder's weights differ from the ones used in training.
+
+```python
+result = aquabench.evaluate(encoder, checkpoint_dir="runs/dinov3_vitb16/linear/SUIM_seed0")
+# -> runs/dinov3_vitb16/linear/SUIM_seed0/result_eval.json
+```
+
+## Logging
+
+Any object with `log(metrics: dict, step: int)`. Keys are prefixed with the dataset name
+(`SUIM/train/loss`, `SUIM/val/miou`, `SUIM/test/miou`, `SUIM/test/iou/<class>`), and
+`step` (optimizer steps) increases monotonically across the datasets of one call.
+
+```python
+class WandbLogger:
+    def __init__(self, run): self.run = run
+    def log(self, metrics, step): self.run.log(metrics, step=step)
+```
+
+## Tests
 
 ```bash
-python scripts/smoke_vjepa.py                      # lightweight ViT-B (fast)
-python scripts/smoke_vjepa.py --encoder vjepa21_vitg   # the 2B ViT-G (large download)
+pytest                                   # unit tests on a tiny synthetic dataset (CPU, ~1 min)
+AQUABENCH_DATA=/data/aquabench pytest    # also checks the downloaded benchmark
+bash scripts/e2e_fresh_install.sh        # fresh install into a new venv + tiny run per run type
 ```
 
 ## Repository layout
 
-Grouped by **role**: `models/` = the network you swap on the CLI (encoder × head),
-`tasks/` = the objective + metric, `data/` = ingestion + on-device transforms, and the
-flat top-level files = orchestration.
-
 ```
 aquabench/
-  cli.py             # LightningCLI (--encoder --head --task --ds)
-  module.py          # TaskModule = compose(encoder, head, task)
-  callbacks.py       # MetricsCallback (per-class IoU + sample preds)
-  probe.py           # precompute + sklearn probe
-  models/
-    encoders/
-      __init__.py    # ENCODERS catalog + build_encoder(...)
-      dense_backbone.py  resnet.py  dummy.py
-      extractors/    # dino / franca / radio / eva / vjepa raw feature extraction
-    heads/
-      __init__.py    # HEADS: linear, upernet, upernet_frozen (return logits only)
-      linear.py  upernet.py
-  tasks/
-    __init__.py      # TASKS registry
-    semantic_seg.py  # SemanticSegTask: CE loss + IoU metric
-  data/
-    __init__.py      # HFSegDataModule (load_dataset only)
-    augment.py       # kornia presets (none/light/medium/heavy)
-    tokens.py        # token-grid helpers
-configs/             # composable Lightning CLI configs
-scripts/             # standalone smoke test (V-JEPA backbone)
+  api.py        # run(), evaluate(), Result, run folder
+  train.py      # plain PyTorch loop with gradient accumulation
+  heads.py      # encoder contract, LinearHead, UPerNetHead
+  data.py       # on-disk layout, token-grid sizing, augmentation
+  metrics.py    # confusion-matrix mIoU
+  config.py     # default + user config
+  configs/      # linear.json, upernet_frozen.json, upernet_finetune.json
+  loggers.py    # Logger protocol, PrintLogger
+  download.py   # unified build -> on-disk layout
+  cli.py        # `aquabench download` / `aquabench verify`
+tests/
+scripts/e2e_fresh_install.sh
+examples/dinov3_sweep.py
 ```
 
 ## Citation
-
-If you use AQUABENCH, please cite:
 
 ```bibtex
 <!-- TODO: add the paper's BibTeX entry -->

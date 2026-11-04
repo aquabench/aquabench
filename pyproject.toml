@@ -1,28 +1,18 @@
 [project]
 name = "aquabench"
-version = "0.1.0"
-description = "Benchmark encoders x heads x tasks for underwater segmentation (Lightning CLI)."
+dynamic = ["version"]
+description = "Underwater semantic segmentation benchmark for prepared encoders (plain PyTorch)."
+readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
     "torch>=2.2",
-    "torchvision",
-    "lightning>=2.2",
-    "transformers>=4.45",
-    "timm>=0.9",
-    "datasets>=2.14",
-    "torchmetrics>=1.0",
-    "kornia>=0.7",
-    "einops",
-    "jsonargparse[signatures]>=4.27",
     "numpy",
     "pillow",
-    "scikit-learn",
-    "wandb",
-    "scipy",
-    "seaborn",
-    "matplotlib",
-    "pandas",
 ]
+
+[project.optional-dependencies]
+download = ["datasets>=2.14"]
+test = ["pytest"]
 
 [project.scripts]
 aquabench = "aquabench.cli:main"
@@ -31,5 +21,11 @@ aquabench = "aquabench.cli:main"
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
+[tool.hatch.version]
+path = "aquabench/__init__.py"
+
 [tool.hatch.build.targets.wheel]
 packages = ["aquabench"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

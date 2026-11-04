@@ -1,4 +1,5 @@
-# logs
+# run folders / logs
+runs/
 logs/
 
 # model checkpoints (downloaded at runtime, not tracked)

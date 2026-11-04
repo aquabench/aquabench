@@ -1,0 +1,13 @@
+{
+  "lr": 1e-4,
+  "weight_decay": 1e-4,
+  "scheduler": "cosine",
+  "epochs": 50,
+  "batch_size": 16,
+  "grad_accum_steps": 2,
+  "precision": "bf16",
+  "augment": true,
+  "normalize": "imagenet",
+  "num_workers": 8,
+  "log_every": 10
+}
