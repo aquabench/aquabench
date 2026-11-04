@@ -20,7 +20,7 @@ result["SUIM"].test_miou         # all-class test mIoU (result.test_miou for a s
 ```
 
 One call = one encoder, one run type, one seed. Multi-seed and multi-model sweeps are
-your own scripts (see [`examples/dinov3_sweep.py`](examples/dinov3_sweep.py)).
+your own scripts (see [`examples/run_dinov2.py`](examples/run_dinov2.py)).
 
 > v1.1 is a lean rewrite of v1 (Lightning CLI + built-in model zoo). The v1 code is on
 > `main` / in the git history; the paper's analysis pipeline is on the `camera-ready` branch.
@@ -43,14 +43,15 @@ aquabench download --data-root /data/aquabench --datasets SUIM COU    # a subset
 aquabench verify   --data-root /data/aquabench                        # check layout and masks
 ```
 
-`--source` takes the Hugging Face dataset repo or a local copy of the unified build
-(`<dir>/_metadata/<cfg>.json` + one parquet config per dataset). Download writes a plain
-layout that training reads with Pillow only:
+Data comes from [huggingface.co/datasets/TorbenGl/AQUABENCH](https://huggingface.co/datasets/TorbenGl/AQUABENCH)
+(`--source` takes another repo id or a local copy of it). Download writes a plain layout
+that training reads with Pillow only, plus each dataset's license notice:
 
 ```
 /data/aquabench/
   SUIM/
     meta.json             # {"num_classes", "ignore_index", "size": [H, W], "class_names"}
+    dataset_license.txt
     train/images/*.png  train/masks/*.png
     val/images/...      val/masks/...
     test/images/...     test/masks/...
@@ -59,15 +60,15 @@ layout that training reads with Pillow only:
 
 Set `$AQUABENCH_DATA` to skip passing `data_root` to `run` / `evaluate`.
 
-| Dataset | short | | Dataset | short |
+| Dataset | hub config | | Dataset | hub config |
 |---|---|---|---|---|
-| CoralScapes | `cs` | | SeaClear | `sc` |
+| CoralScapes | `coralscapes` | | SeaClear | `seaclear` |
 | COU | `cou` | | SUIM | `suim` |
-| DeepFish | `df` | | TrashCan | `tc` |
+| DeepFish | `deepfish` | | TrashCan | `trashcan` |
 | L4S (Looking for Seagrass) | `l4s` | | UIIS10K | `uiis10k` |
 | LIACi | `liaci` | | | |
 
-Names are case-insensitive; the v1 short names work too. Splits are frozen as shipped.
+Names are case-insensitive; hub config names and v1 short names (`cs`, `df`, `sc`, `tc`) work too. Splits are frozen as shipped.
 
 ## Encoder contract
 
@@ -91,6 +92,11 @@ class DINOv3Pyramid(nn.Module):
     def forward(self, x):
         return list(self.m.get_intermediate_layers(x, n=self.layers, reshape=True, norm=True))
 ```
+
+[`examples/run_dinov2.py`](examples/run_dinov2.py) is a complete user script: DINOv2 from
+`torch.hub` (public weights), optionally your own weights via `--weights file.pt`
+(`torch.load` state dict; `module.` / `backbone.` prefixes and `{"model": ...}` wrappers
+are handled), wrapped for `linear` or `upernet_*`, looped over seeds.
 
 Inputs are ImageNet-normalized (set `"normalize": "none"` in the config to get `[0, 1]`).
 The run folder is named after `encoder_name=...`, else `encoder.name`, else the class name.
@@ -178,7 +184,7 @@ aquabench/
   cli.py        # `aquabench download` / `aquabench verify`
 tests/
 scripts/e2e_fresh_install.sh
-examples/dinov3_sweep.py
+examples/run_dinov2.py
 ```
 
 ## Citation

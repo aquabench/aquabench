@@ -55,12 +55,15 @@ def data_root(tmp_path):
 
 @pytest.fixture(params=["synthetic", "real"])
 def any_data_root(request, tmp_path):
-    """Synthetic data always; the real benchmark too when $AQUABENCH_DATA is set."""
+    """Synthetic data always; the downloaded datasets too when $AQUABENCH_DATA is set."""
     if request.param == "real":
         real = os.environ.get("AQUABENCH_DATA")
         if not real:
             pytest.skip("set $AQUABENCH_DATA to also check the downloaded benchmark")
-        return Path(real), "all"
+        names = sorted(d.name for d in Path(real).iterdir() if (d / "meta.json").exists())
+        if not names:
+            pytest.skip(f"no datasets in {real}")
+        return Path(real), names
     return write_toy(tmp_path / "data"), ["Toy"]
 
 

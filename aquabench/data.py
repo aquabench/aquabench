@@ -29,18 +29,20 @@ from torch.utils.data import Dataset
 #: The patch size the dataset sizes in meta.json are defined for.
 REFERENCE_PATCH_SIZE = 16
 
-#: Canonical dataset name -> config name in the unified source build (v1 short names).
+#: Canonical dataset name -> config name on the Hugging Face hub.
 DATASETS: Dict[str, str] = {
-    "CoralScapes": "cs",
+    "CoralScapes": "coralscapes",
     "COU": "cou",
-    "DeepFish": "df",
+    "DeepFish": "deepfish",
     "L4S": "l4s",
     "LIACi": "liaci",
-    "SeaClear": "sc",
+    "SeaClear": "seaclear",
     "SUIM": "suim",
-    "TrashCan": "tc",
+    "TrashCan": "trashcan",
     "UIIS10K": "uiis10k",
 }
+#: v1 short names that differ from the hub config names.
+ALIASES: Dict[str, str] = {"cs": "CoralScapes", "df": "DeepFish", "sc": "SeaClear", "tc": "TrashCan"}
 
 SPLITS = ("train", "val", "test")
 IMAGE_EXTS = (".png", ".jpg", ".jpeg")
@@ -87,13 +89,20 @@ def input_size(size: Sequence[int], patch_size: int) -> Tuple[int, int]:
 
 # --------------------------------------------------------------------------- dataset lookup
 
+def canonical_name(name: str) -> Optional[str]:
+    """Canonical dataset name for a canonical, hub config or v1 short name (case-insensitive)."""
+    n = name.lower()
+    for canonical, config in DATASETS.items():
+        if n in (canonical.lower(), config):
+            return canonical
+    return ALIASES.get(n)
+
+
 def find_dataset(data_root: Union[str, Path], name: str) -> Path:
-    """Folder of dataset ``name`` (case-insensitive; v1 short names like ``suim`` work too)."""
+    """Folder of dataset ``name`` (case-insensitive; hub config and v1 short names work too)."""
     root = Path(data_root)
-    wanted = {name.lower()}
-    for canonical, short in DATASETS.items():
-        if name.lower() in (canonical.lower(), short):
-            wanted |= {canonical.lower(), short}
+    canonical = canonical_name(name)
+    wanted = {name.lower()} | ({canonical.lower()} if canonical else set())
     if root.is_dir():
         for d in sorted(root.iterdir()):
             if d.is_dir() and d.name.lower() in wanted and (d / "meta.json").exists():
