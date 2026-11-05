@@ -30,6 +30,49 @@ def test_linear_rejects_wrong_encoder_output(run_type, pyramid, data_root, tmp_p
         _run(enc, run_type, data_root, tmp_path)
 
 
+@pytest.mark.parametrize("run_type", ["linear", "upernet_frozen", "upernet_finetune"])
+def test_wrong_patch_size_is_rejected(run_type, data_root, tmp_path):
+    """A patch 8 encoder run with the default patch_size=16 misses the token grid."""
+    with pytest.raises(aquabench.EncoderContractError, match="token grid is \\[4, 4\\]"):
+        _run(tiny_encoder(run_type, patch_size=8), run_type, data_root, tmp_path)
+
+
+@pytest.mark.parametrize("run_type", ["linear", "upernet_frozen"])
+def test_matching_patch_size_runs(run_type, data_root, tmp_path):
+    """The same patch 14 encoder runs once patch_size says so."""
+    res = _run(tiny_encoder(run_type, patch_size=14), run_type, data_root, tmp_path, patch_size=14)
+    assert 0.0 <= res["Toy"].test_miou <= 1.0
+
+
+class CnnPyramid(nn.Module):
+    """Stages at strides 4, 8, 16, 32, as a CNN returns them."""
+
+    def __init__(self):
+        super().__init__()
+        self.stages = nn.ModuleList(nn.Conv2d(3, 8, s, stride=s) for s in (4, 8, 16, 32))
+
+    def forward(self, x):
+        return [stage(x) for stage in self.stages]
+
+
+def test_cnn_pyramid_uses_its_total_stride(data_root, tmp_path):
+    """A CNN pyramid passes with patch_size=32, its total stride, and fails with the default."""
+    res = _run(CnnPyramid(), "upernet_frozen", data_root, tmp_path, patch_size=32)
+    assert 0.0 <= res["Toy"].test_miou <= 1.0
+    with pytest.raises(aquabench.EncoderContractError, match="total stride"):
+        _run(CnnPyramid(), "upernet_frozen", data_root, tmp_path)
+
+
+def test_bad_second_dataset_stops_the_run_before_training(data_root, tmp_path):
+    """All datasets are checked first, so a bad later one does not waste the earlier runs."""
+    (data_root / "SUIM").mkdir()
+    (data_root / "SUIM" / "meta.json").write_text('{"num_classes": 8, "ignore_index": 255, "size": [272, 480]}')
+    with pytest.raises(ValueError, match="SUIM must have size"):
+        aquabench.run(tiny_encoder("linear"), run_type="linear", data_root=data_root, datasets=["Toy", "SUIM"],
+                      config=FAST, logger=ListLogger(), output_dir=tmp_path / "runs", device="cpu")
+    assert not (tmp_path / "runs").exists()
+
+
 @pytest.mark.parametrize("run_type", ["linear", "upernet_frozen"])
 def test_frozen_encoder_stays_unchanged(run_type, data_root, tmp_path):
     """Encoder weights and buffers (BN stats) are identical before and after a frozen run."""

@@ -27,8 +27,19 @@ class EncoderContractError(ValueError):
     """The encoder output does not match what the run type expects."""
 
 
-def check_encoder_output(out, run_type: str) -> List[int]:
-    """Validate the encoder output for ``run_type``; return the channel count per level."""
+def _check_token_grid(feat: torch.Tensor, grid: Sequence[int], run_type: str) -> None:
+    """The encoder's last map must have exactly one token per grid cell."""
+    if tuple(feat.shape[-2:]) != tuple(grid):
+        raise EncoderContractError(
+            f"run_type {run_type!r}: the encoder's last feature map is {list(feat.shape[-2:])}, but the "
+            f"dataset's token grid is {list(grid)}. Set patch_size to the encoder's total stride "
+            f"(e.g. 14 for a ViT/14, 32 for a ResNet)."
+        )
+
+
+def check_encoder_output(out, run_type: str, grid: Sequence[int]) -> List[int]:
+    """Validate the encoder output for ``run_type`` and the dataset's token ``grid``;
+    return the channel count per level."""
     if run_type not in RUN_TYPES:
         raise ValueError(f"run_type must be one of {RUN_TYPES}, got {run_type!r}")
 
@@ -46,6 +57,7 @@ def check_encoder_output(out, run_type: str) -> List[int]:
                 f"but it returned {describe(out)}. Return only the last feature map for linear "
                 f"probing, or use run_type 'upernet_frozen' / 'upernet_finetune' for 4 maps."
             )
+        _check_token_grid(out, grid, run_type)
         return [out.shape[1]]
 
     ok = (isinstance(out, (list, tuple)) and len(out) == UPERNET_LEVELS
@@ -58,6 +70,7 @@ def check_encoder_output(out, run_type: str) -> List[int]:
         )
     if len({o.shape[0] for o in out}) != 1:
         raise EncoderContractError(f"feature maps disagree on batch size: {[list(o.shape) for o in out]}")
+    _check_token_grid(out[-1], grid, run_type)
     return [o.shape[1] for o in out]
 
 

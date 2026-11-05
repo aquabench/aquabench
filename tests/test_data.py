@@ -8,8 +8,10 @@ import torch
 from PIL import Image
 
 from aquabench.config import default_config, load_config
-from aquabench.data import (SegDataset, augment_pair, input_size, load_meta, resolve_datasets,
-                            token_grid, verify_data_root)
+from aquabench.data import (DATASET_SPECS, DATASETS, SegDataset, augment_pair, check_dataset, input_size,
+                            load_meta, resolve_datasets, token_grid, verify_data_root)
+
+from conftest import write_toy
 
 
 def test_download_creates_expected_layout(any_data_root):
@@ -35,6 +37,63 @@ def test_dataset_size_divisible_by_16(any_data_root, tmp_path):
     (tmp_path / "Bad" / "meta.json").write_text(json.dumps({"num_classes": 2, "ignore_index": 255, "size": [60, 64]}))
     with pytest.raises(ValueError, match="divisible by 16"):
         load_meta(tmp_path / "Bad")
+
+
+def _write_meta(root, folder, size, num_classes=8):
+    (root / folder).mkdir()
+    (root / folder / "meta.json").write_text(json.dumps({"num_classes": num_classes, "ignore_index": 255, "size": size}))
+    return root / folder
+
+
+@pytest.mark.parametrize("folder", ["SUIM", "suim"])
+def test_benchmark_dataset_with_wrong_size_is_rejected(folder, tmp_path):
+    """A benchmark dataset must have its expected size; the folder name is matched like find_dataset."""
+    with pytest.raises(ValueError, match=r"SUIM must have size \[480, 640\], got \[272, 480\]"):
+        load_meta(_write_meta(tmp_path, folder, [272, 480]))
+
+
+def test_benchmark_dataset_with_wrong_class_count_is_rejected(tmp_path):
+    """Same-size datasets differ in class count: UIIS10K data in a SUIM folder is caught."""
+    with pytest.raises(ValueError, match="SUIM must have 8 classes, got 11"):
+        load_meta(_write_meta(tmp_path, "SUIM", [480, 640], num_classes=11))
+
+
+def test_expected_specs_pass_and_other_datasets_are_not_checked(tmp_path):
+    """Every benchmark dataset loads with its spec; custom folder names keep any valid meta."""
+    assert DATASET_SPECS.keys() == DATASETS.keys()
+    for name, spec in DATASET_SPECS.items():
+        meta = load_meta(_write_meta(tmp_path, name, list(spec["size"]), spec["num_classes"]))
+        assert meta["size"] == list(spec["size"])
+    assert load_meta(_write_meta(tmp_path, "MyData", [272, 480]))["size"] == [272, 480]
+
+
+def test_verify_reports_wrong_benchmark_size(tmp_path):
+    """verify_data_root lists a wrong size as a problem instead of raising."""
+    _write_meta(tmp_path, "SUIM", [272, 480])
+    assert any("must have size" in p for p in verify_data_root(tmp_path, ["SUIM"], check_masks=False))
+
+
+@pytest.fixture
+def toy_suim(tmp_path, monkeypatch):
+    """A toy dataset named SUIM whose spec matches it, so only a changed count can fail."""
+    monkeypatch.setitem(DATASET_SPECS, "SUIM", {"size": (64, 64), "num_classes": 3,
+                                                "samples": {"train": 8, "val": 4, "test": 4}})
+    return write_toy(tmp_path, name="SUIM")
+
+
+def test_matching_sample_counts_pass(toy_suim):
+    """A benchmark dataset with the expected samples per split passes both checks."""
+    assert check_dataset(toy_suim / "SUIM")["num_classes"] == 3
+    assert verify_data_root(toy_suim, ["SUIM"], check_masks=False) == []
+
+
+def test_wrong_sample_count_is_rejected(toy_suim):
+    """A missing sample is caught by check_dataset and listed by verify_data_root."""
+    (toy_suim / "SUIM" / "test" / "images" / "000000.png").unlink()
+    (toy_suim / "SUIM" / "test" / "masks" / "000000.png").unlink()
+    with pytest.raises(ValueError, match="expected 4 samples, found 3"):
+        check_dataset(toy_suim / "SUIM")
+    assert any("expected 4 samples, found 3" in p for p in verify_data_root(toy_suim, ["SUIM"], check_masks=False))
 
 
 def test_input_size_matches_token_grid():

@@ -81,7 +81,9 @@ AQUABENCH does no encoder handling: no model zoo, no weight loading, no layer se
 | `upernet_finetune` | trained | list of 4 tensors `[B, C_i, h_i, w_i]` | UPerNet (PPM + FPN) |
 
 The output is checked on a dummy image before training; a mismatch raises
-`aquabench.EncoderContractError` with a clear message. If the 4 maps all share one
+`aquabench.EncoderContractError` with a clear message. This includes the token grid: the
+last map must be `size / 16`, so set `patch_size` to the encoder's total stride (14 for a
+ViT/14, 32 for a ResNet). If the 4 maps all share one
 spatial size (plain ViT), the UPerNet head resizes them ×4, ×2, ×1, ×0.5 into a pyramid,
 as in v1; maps that already form a pyramid (CNNs) are used as they are.
 
@@ -107,6 +109,8 @@ The run folder is named after `encoder_name=...`, else `encoder.name`, else the 
   own aspect ratio. Token grid = size / 16. The encoder input is `grid × patch_size`
   (`patch_size=16` by default; `14` gives a smaller input with the same token count).
   Masks stay at the dataset size, so metrics are comparable across patch sizes.
+  A run stops at the start if a benchmark dataset does not have its expected size, class
+  count and samples per split.
 - **Training.** AdamW, cosine schedule, 50 epochs, effective batch 32
   (`batch_size` 16 × `grad_accum_steps` 2), bf16 autocast. Learning rate 1e-3 for
   `linear`, 1e-4 for both UPerNet run types.

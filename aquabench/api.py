@@ -31,7 +31,8 @@ from torch.utils.data import DataLoader
 
 from aquabench import __version__
 from aquabench.config import ConfigLike, load_config
-from aquabench.data import SegDataset, find_dataset, load_meta, maybe_dataset, resolve_datasets
+from aquabench.data import (SegDataset, check_dataset, find_dataset, load_meta, maybe_dataset, resolve_datasets,
+                            token_grid)
 from aquabench.heads import SegModel, build_head, check_encoder_output
 from aquabench.loggers import Logger, PrintLogger
 from aquabench.train import evaluate_loader, seed_everything, train_epoch
@@ -98,8 +99,9 @@ def run(
         logger: anything with ``log(metrics: dict, step: int)``; default prints.
         data_root: folder from ``aquabench download``; default ``$AQUABENCH_DATA``.
         datasets: ``"all"``, one name (``"SUIM"``) or a list of names.
-        patch_size: encoder patch size; the input is resized so every encoder gets the
-            dataset's token grid (defined at patch 16).
+        patch_size: encoder patch size or total stride (32 for a ResNet); the input is resized
+            so every encoder gets the dataset's token grid (defined at patch 16). The encoder's
+            last feature map must have that grid, else ``EncoderContractError`` is raised.
         augment: overrides the config's ``augment`` (default off for linear / frozen, on for finetune).
         config: JSON path or dict overriding the shipped default config for ``run_type``.
         output_dir: root of the run folders.
@@ -110,6 +112,8 @@ def run(
     cfg = load_config(run_type, config, augment)
     logger = logger or PrintLogger()
     ds_dirs = resolve_datasets(_data_root(data_root), datasets)
+    for ds_dir in ds_dirs:  # a bad dataset fails now, not after the ones before it have trained
+        check_dataset(ds_dir)
     device = _device(device)
     encoder_name = _safe_name(encoder_name or getattr(encoder, "name", None) or type(encoder).__name__)
     encoder.to(device)
@@ -157,7 +161,7 @@ def evaluate(
     ckpt = torch.load(path, map_location="cpu", weights_only=True)
     cfg, run_type = ckpt["config"], ckpt["run_type"]
     ds_dir = find_dataset(_data_root(data_root), dataset or ckpt["dataset"])
-    meta = load_meta(ds_dir)
+    meta = check_dataset(ds_dir)
     if meta["num_classes"] != ckpt["num_classes"]:
         raise ValueError(f"checkpoint has {ckpt['num_classes']} classes, {meta['name']} has {meta['num_classes']}")
     logger = logger or PrintLogger()
@@ -169,7 +173,7 @@ def evaluate(
     t0 = time.time()
     test_set = SegDataset(ds_dir, "test", patch_size=cfg["patch_size"], normalize=cfg["normalize"])
     with _keep_requires_grad(encoder):
-        channels = _probe_channels(encoder, run_type, test_set.input_size, device)
+        channels = _probe_channels(encoder, run_type, test_set, device)
         if channels != ckpt["in_channels"]:
             raise ValueError(f"encoder outputs channels {channels}, checkpoint expects {ckpt['in_channels']}")
         if not _same_fingerprint(_fingerprint(encoder), ckpt.get("encoder_fingerprint")):
@@ -213,7 +217,7 @@ def _run_dataset(encoder, ds_dir, *, run_type, cfg, seed, patch_size, logger, st
         raise ValueError(f"{name}: {len(train_set)} training samples < batch_size {cfg['batch_size']}")
 
     with _keep_requires_grad(encoder):
-        channels = _probe_channels(encoder, run_type, train_set.input_size, device)
+        channels = _probe_channels(encoder, run_type, train_set, device)
         head = build_head(run_type, channels, num_classes).to(device)
         model = SegModel(encoder, head, freeze_encoder=run_type != "upernet_finetune")
 
@@ -270,14 +274,14 @@ def _run_dataset(encoder, ds_dir, *, run_type, cfg, seed, patch_size, logger, st
 
 # --------------------------------------------------------------------------- helpers
 
-def _probe_channels(encoder, run_type, input_hw, device) -> List[int]:
+def _probe_channels(encoder, run_type, dataset, device) -> List[int]:
     """Run one dummy image through the encoder and check its output against the contract."""
     was_training = encoder.training
     encoder.eval()
     with torch.no_grad():
-        out = encoder(torch.zeros(1, 3, *input_hw, device=device))
+        out = encoder(torch.zeros(1, 3, *dataset.input_size, device=device))
     encoder.train(was_training)
-    return check_encoder_output(out, run_type)
+    return check_encoder_output(out, run_type, token_grid(dataset.size))
 
 
 def _fingerprint(module: nn.Module) -> List[float]:

@@ -43,6 +43,21 @@ DATASETS: Dict[str, str] = {
 }
 #: v1 short names that differ from the hub config names.
 ALIASES: Dict[str, str] = {"cs": "CoralScapes", "df": "DeepFish", "sc": "SeaClear", "tc": "TrashCan"}
+#: Expected size ``(H, W)``, class count and samples per split of each benchmark dataset, as on
+#: the hub. Other folder names are not checked.
+DATASET_SPECS: Dict[str, dict] = {
+    "CoralScapes": {"size": (512, 1024), "num_classes": 39, "samples": {"train": 1517, "val": 166, "test": 392}},
+    "COU": {"size": (576, 1024), "num_classes": 24, "samples": {"train": 6753, "val": 1952, "test": 958}},
+    "DeepFish": {"size": (576, 1024), "num_classes": 2, "samples": {"train": 310, "val": 124, "test": 186}},
+    "L4S": {"size": (576, 1024), "num_classes": 2, "samples": {"train": 4223, "val": 610, "test": 1204}},
+    "LIACi": {"size": (576, 1024), "num_classes": 11, "samples": {"train": 1233, "val": 137, "test": 191}},
+    "SeaClear": {"size": (576, 1024), "num_classes": 41, "samples": {"train": 6071, "val": 674, "test": 1865}},
+    "SUIM": {"size": (480, 640), "num_classes": 8, "samples": {"train": 1297, "val": 228, "test": 110}},
+    "TrashCan": {"size": (576, 1024), "num_classes": 23, "samples": {"train": 5459, "val": 606, "test": 1147}},
+    "UIIS10K": {"size": (480, 640), "num_classes": 11, "samples": {"train": 7234, "val": 804, "test": 2010}},
+}
+
+_REDOWNLOAD = "Wrong or outdated data? Re-download with `aquabench download --force`."
 
 SPLITS = ("train", "val", "test")
 IMAGE_EXTS = (".png", ".jpg", ".jpeg")
@@ -69,7 +84,32 @@ def load_meta(ds_dir: Union[str, Path]) -> dict:
     h, w = meta["size"]
     if h % REFERENCE_PATCH_SIZE or w % REFERENCE_PATCH_SIZE:
         raise ValueError(f"{path}: size {meta['size']} is not divisible by {REFERENCE_PATCH_SIZE}")
+    spec = _spec(ds_dir)
+    if spec:
+        canonical = canonical_name(Path(ds_dir).name)
+        if (h, w) != spec["size"]:
+            raise ValueError(f"{path}: {canonical} must have size {list(spec['size'])}, got {meta['size']}. {_REDOWNLOAD}")
+        if meta["num_classes"] != spec["num_classes"]:
+            raise ValueError(f"{path}: {canonical} must have {spec['num_classes']} classes, "
+                             f"got {meta['num_classes']}. {_REDOWNLOAD}")
     meta.setdefault("name", Path(ds_dir).name)
+    return meta
+
+
+def _spec(ds_dir: Union[str, Path]) -> Optional[dict]:
+    """Expected properties if ``ds_dir`` is a benchmark dataset, else None."""
+    return DATASET_SPECS.get(canonical_name(Path(ds_dir).name))
+
+
+def check_dataset(ds_dir: Union[str, Path]) -> dict:
+    """``load_meta`` plus, for a benchmark dataset, the sample count of every split."""
+    meta = load_meta(ds_dir)
+    spec = _spec(ds_dir)
+    for split, expected in (spec["samples"] if spec else {}).items():
+        sd = Path(ds_dir) / split
+        found = len(list_pairs(sd)) if (sd / "images").is_dir() and (sd / "masks").is_dir() else 0
+        if found != expected:
+            raise ValueError(f"{sd}: expected {expected} samples, found {found}. {_REDOWNLOAD}")
     return meta
 
 
@@ -157,6 +197,9 @@ def verify_data_root(data_root: Union[str, Path], datasets: Union[str, Sequence[
                 continue
             if not pairs:
                 problems.append(f"{sd}: no samples")
+            spec = _spec(d)
+            if spec and len(pairs) != spec["samples"][split]:
+                problems.append(f"{sd}: expected {spec['samples'][split]} samples, found {len(pairs)}")
             if check_masks:
                 for _, mp in pairs:
                     bad = invalid_mask_values(np.array(Image.open(mp)), meta)
