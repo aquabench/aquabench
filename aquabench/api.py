@@ -31,11 +31,11 @@ from torch.utils.data import DataLoader
 
 from aquabench import __version__
 from aquabench.config import ConfigLike, load_config
-from aquabench.data import (SegDataset, check_dataset, find_dataset, load_meta, maybe_dataset, resolve_datasets,
-                            token_grid)
+from aquabench.data import (Normalize, SegDataset, check_dataset, find_dataset, load_meta, maybe_dataset,
+                            normalize_label, resolve_datasets, token_grid)
 from aquabench.heads import SegModel, build_head, check_encoder_output
 from aquabench.loggers import Logger, PrintLogger
-from aquabench.train import evaluate_loader, seed_everything, train_epoch
+from aquabench.train import evaluate_loader, lr_factors, seed_everything, train_epoch
 
 DATA_ROOT_ENV = "AQUABENCH_DATA"
 
@@ -82,6 +82,9 @@ def run(
     datasets: Union[str, Sequence[str]] = "all",
     patch_size: int = 16,
     augment: Optional[bool] = None,
+    batch_size: Optional[int] = None,
+    grad_accum_steps: Optional[int] = None,
+    normalize: Optional[Normalize] = None,
     config: ConfigLike = None,
     output_dir: Union[str, Path] = "runs",
     checkpoint_dir: Union[None, str, Path] = None,
@@ -102,14 +105,21 @@ def run(
         patch_size: encoder patch size or total stride (32 for a ResNet); the input is resized
             so every encoder gets the dataset's token grid (defined at patch 16). The encoder's
             last feature map must have that grid, else ``EncoderContractError`` is raised.
-        augment: overrides the config's ``augment`` (default off for linear / frozen, on for finetune).
+        augment: overrides the config's ``augment`` (default off for linear, on for both UPerNet types).
+        batch_size: overrides the config's ``batch_size`` (default 16).
+        grad_accum_steps: overrides the config's ``grad_accum_steps`` (default 2). The effective
+            batch is ``batch_size x grad_accum_steps``.
+        normalize: overrides the config's ``normalize`` (default ``"imagenet"``). ``"imagenet"``,
+            ``"none"`` for ``[0, 1]`` images, or a callable taking a ``[3, H, W]`` image in
+            ``[0, 1]``. Use what the encoder was trained with; this is not checked.
         config: JSON path or dict overriding the shipped default config for ``run_type``.
         output_dir: root of the run folders.
         checkpoint_dir: put checkpoints under this root instead of next to the results.
         save_checkpoint: ``False`` writes only config / history / result.
         encoder_name: folder name; default ``encoder.name`` or the class name.
     """
-    cfg = load_config(run_type, config, augment)
+    cfg = load_config(run_type, config, augment, batch_size, grad_accum_steps, normalize)
+    normalize = normalize if callable(normalize) else cfg["normalize"]
     logger = logger or PrintLogger()
     ds_dirs = resolve_datasets(_data_root(data_root), datasets)
     for ds_dir in ds_dirs:  # a bad dataset fails now, not after the ones before it have trained
@@ -129,7 +139,7 @@ def run(
             encoder.load_state_dict(initial)
         rel = Path(encoder_name) / run_type / f"{load_meta(ds_dir)['name']}_seed{seed}"
         res = _run_dataset(
-            encoder, ds_dir, run_type=run_type, cfg=cfg, seed=seed, patch_size=patch_size,
+            encoder, ds_dir, run_type=run_type, cfg=cfg, seed=seed, patch_size=patch_size, normalize=normalize,
             logger=logger, step=step, device=device, encoder_name=encoder_name,
             run_dir=Path(output_dir) / rel,
             ckpt_dir=(Path(checkpoint_dir) / rel) if checkpoint_dir else Path(output_dir) / rel,
@@ -148,18 +158,24 @@ def evaluate(
     logger: Optional[Logger] = None,
     output_dir: Union[None, str, Path] = None,
     device: Union[None, str, torch.device] = None,
+    normalize: Optional[Normalize] = None,
 ) -> Result:
     """Test a saved checkpoint without training.
 
     ``checkpoint_dir`` is a run folder (or a ``checkpoint.pt`` path). The encoder is
     supplied by the caller; the checkpoint provides the head, plus encoder weights for
     ``upernet_finetune``. Writes ``result_eval.json`` next to the checkpoint, or into the
-    usual run-folder layout under ``output_dir`` if given.
+    usual run-folder layout under ``output_dir`` if given. ``normalize`` defaults to the
+    checkpoint's; a run trained with a callable needs it passed again, as only its name is stored.
     """
     path = Path(checkpoint_dir)
     path = path / "checkpoint.pt" if path.is_dir() else path
     ckpt = torch.load(path, map_location="cpu", weights_only=True)
     cfg, run_type = ckpt["config"], ckpt["run_type"]
+    if normalize is None and cfg["normalize"].startswith("callable:"):
+        raise ValueError(f"This checkpoint was trained with {cfg['normalize']}; pass it again as normalize=...")
+    normalize = cfg["normalize"] if normalize is None else normalize
+    cfg = {**cfg, "normalize": normalize_label(normalize)}
     ds_dir = find_dataset(_data_root(data_root), dataset or ckpt["dataset"])
     meta = check_dataset(ds_dir)
     if meta["num_classes"] != ckpt["num_classes"]:
@@ -171,7 +187,7 @@ def evaluate(
     encoder.to(device)
 
     t0 = time.time()
-    test_set = SegDataset(ds_dir, "test", patch_size=cfg["patch_size"], normalize=cfg["normalize"])
+    test_set = SegDataset(ds_dir, "test", patch_size=cfg["patch_size"], normalize=normalize)
     with _keep_requires_grad(encoder):
         channels = _probe_channels(encoder, run_type, test_set, device)
         if channels != ckpt["in_channels"]:
@@ -200,7 +216,7 @@ def evaluate(
 
 # --------------------------------------------------------------------------- one dataset
 
-def _run_dataset(encoder, ds_dir, *, run_type, cfg, seed, patch_size, logger, step, device,
+def _run_dataset(encoder, ds_dir, *, run_type, cfg, seed, patch_size, normalize, logger, step, device,
                  encoder_name, run_dir, ckpt_dir, save_checkpoint) -> Result:
     t0 = time.time()
     meta = load_meta(ds_dir)
@@ -209,7 +225,7 @@ def _run_dataset(encoder, ds_dir, *, run_type, cfg, seed, patch_size, logger, st
     _write_json(run_dir / "config.json", config)
 
     seed_everything(seed)
-    ds_kw = dict(patch_size=patch_size, normalize=cfg["normalize"])
+    ds_kw = dict(patch_size=patch_size, normalize=normalize)
     train_set = SegDataset(ds_dir, "train", augment=cfg["augment"], **ds_kw)
     val_set = maybe_dataset(ds_dir, "val", **ds_kw)
     test_set = SegDataset(ds_dir, "test", **ds_kw)
@@ -221,10 +237,16 @@ def _run_dataset(encoder, ds_dir, *, run_type, cfg, seed, patch_size, logger, st
         head = build_head(run_type, channels, num_classes).to(device)
         model = SegModel(encoder, head, freeze_encoder=run_type != "upernet_finetune")
 
-        params = [p for p in model.parameters() if p.requires_grad]
-        opt = torch.optim.AdamW(params, lr=cfg["lr"], weight_decay=cfg["weight_decay"])
-        sched = (torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=cfg["epochs"])
-                 if cfg["scheduler"] == "cosine" else None)
+        # upernet_finetune: the encoder has its own (lower) learning rate, is frozen for the first
+        # freeze_encoder_epochs, then ramps up over encoder_warmup_epochs. Other run types: head only.
+        finetune = run_type == "upernet_finetune"
+        groups = [{"params": list(head.parameters()), "lr": cfg["lr"]}]
+        if finetune:
+            groups.append({"params": list(encoder.parameters()), "lr": cfg["lr"] * cfg["encoder_lr_scale"]})
+        opt = torch.optim.AdamW(groups, lr=cfg["lr"], weight_decay=cfg["weight_decay"])
+        head_factor, encoder_factor = lr_factors(cfg["epochs"], cfg["scheduler"],
+                                                 cfg.get("freeze_encoder_epochs", 0), cfg.get("encoder_warmup_epochs", 0))
+        sched = torch.optim.lr_scheduler.LambdaLR(opt, [head_factor, encoder_factor][:len(groups)])
         gen = torch.Generator().manual_seed(seed)
         train_loader = _loader(train_set, cfg, device, shuffle=True, generator=gen)
         val_loader = _loader(val_set, cfg, device) if val_set is not None else None
@@ -234,15 +256,19 @@ def _run_dataset(encoder, ds_dir, *, run_type, cfg, seed, patch_size, logger, st
         def on_step(loss: float):
             step[0] += 1
             if step[0] % cfg["log_every"] == 0:
-                logger.log({f"{name}/train/loss": loss, f"{name}/train/lr": opt.param_groups[0]["lr"]}, step[0])
+                lrs = {f"{name}/train/lr": opt.param_groups[0]["lr"]}
+                if finetune:
+                    lrs[f"{name}/train/encoder_lr"] = opt.param_groups[1]["lr"]
+                logger.log({f"{name}/train/loss": loss, **lrs}, step[0])
 
         history, val_miou = [], None
         for epoch in range(1, cfg["epochs"] + 1):
+            if finetune:
+                model.set_encoder_frozen(epoch <= cfg["freeze_encoder_epochs"])
             train_loss = train_epoch(model, train_loader, opt, grad_accum_steps=cfg["grad_accum_steps"],
                                      ignore_index=ignore, device=device, precision=cfg["precision"],
                                      on_step=on_step)
-            if sched is not None:
-                sched.step()
+            sched.step()
             if val_loader is not None:
                 val_miou = evaluate_loader(model, val_loader, **eval_kw)[0]
             history.append({"epoch": epoch, "train_loss": train_loss, "val_miou": val_miou})

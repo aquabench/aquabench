@@ -6,7 +6,7 @@
   "batch_size": 16,
   "grad_accum_steps": 2,
   "precision": "bf16",
-  "augment": false,
+  "augment": true,
   "normalize": "imagenet",
   "num_workers": 8,
   "log_every": 10

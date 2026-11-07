@@ -36,6 +36,47 @@ def test_config_copied_to_run_folder(data_root, tmp_path):
     assert cfg == res.config
     assert cfg["augment"] is True and cfg["epochs"] == FAST["epochs"] and cfg["lr"] == 1e-3
     assert cfg["patch_size"] == 16 and cfg["run_type"] == "linear"
+    _run(tiny_encoder("linear"), "linear", data_root, tmp_path / "batch", batch_size=4, grad_accum_steps=3)
+    cfg = json.loads((tmp_path / "batch" / "tiny" / "linear" / "Toy_seed0" / "config.json").read_text())
+    assert (cfg["batch_size"], cfg["grad_accum_steps"]) == (4, 3)
+
+
+def _times_two(img):
+    return img * 2
+
+
+class Scale:
+    def __call__(self, img):
+        return img * 2
+
+    def __repr__(self):
+        return "Scale(2)"
+
+
+@pytest.mark.parametrize("fn, label", [(_times_two, "callable:_times_two"), (Scale(), "callable:Scale(2)")])
+def test_normalize_callable_is_recorded_by_name(fn, label, data_root, tmp_path):
+    """The run works, config.json and the checkpoint stay plain, and evaluate needs the callable again."""
+    enc = tiny_encoder("linear")
+    res = _run(enc, "linear", data_root, tmp_path / "runs", normalize=fn)
+    run_dir = tmp_path / "runs" / "tiny" / "linear" / "Toy_seed0"
+    assert json.loads((run_dir / "config.json").read_text())["normalize"] == label
+    assert json.loads((run_dir / "result.json").read_text())["config"]["normalize"] == label
+    with pytest.raises(ValueError, match="pass it again"):
+        aquabench.evaluate(enc, run_dir, data_root=data_root, device="cpu", logger=ListLogger())
+    again = aquabench.evaluate(enc, run_dir, data_root=data_root, device="cpu", logger=ListLogger(), normalize=fn)
+    assert again.test_miou == pytest.approx(res.test_miou)
+    assert again.config["normalize"] == label
+
+
+def test_normalize_callable_gives_the_same_result_as_the_equivalent_string(data_root, tmp_path):
+    """A callable with the ImageNet stats matches normalize='imagenet' exactly."""
+    from aquabench.data import IMAGENET_MEAN, IMAGENET_STD
+    import torch
+
+    mean, std = torch.tensor(IMAGENET_MEAN).view(3, 1, 1), torch.tensor(IMAGENET_STD).view(3, 1, 1)
+    a = _run(tiny_encoder("linear"), "linear", data_root, tmp_path / "a", normalize="imagenet")
+    b = _run(tiny_encoder("linear"), "linear", data_root, tmp_path / "b", normalize=lambda x: (x - mean) / std)
+    assert a.test_miou == pytest.approx(b.test_miou)
 
 
 def test_save_checkpoint_false(data_root, tmp_path):

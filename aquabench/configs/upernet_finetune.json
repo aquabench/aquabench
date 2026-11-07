@@ -1,6 +1,9 @@
 {
-  "lr": 1e-4,
-  "weight_decay": 1e-4,
+  "lr": 0.0001,
+  "encoder_lr_scale": 0.1,
+  "freeze_encoder_epochs": 1,
+  "encoder_warmup_epochs": 2,
+  "weight_decay": 0.0001,
   "scheduler": "cosine",
   "epochs": 50,
   "batch_size": 16,

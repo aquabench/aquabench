@@ -150,9 +150,13 @@ class SegModel(nn.Module):
         super().__init__()
         self.encoder = encoder
         self.head = head
-        self.freeze_encoder = freeze_encoder
-        for p in encoder.parameters():
-            p.requires_grad_(not freeze_encoder)
+        self.set_encoder_frozen(freeze_encoder)
+
+    def set_encoder_frozen(self, frozen: bool) -> None:
+        """Frozen: no gradients and eval mode, so BatchNorm statistics don't change either."""
+        self.freeze_encoder = frozen
+        for p in self.encoder.parameters():
+            p.requires_grad_(not frozen)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         if self.freeze_encoder:

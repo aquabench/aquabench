@@ -100,7 +100,18 @@ class DINOv3Pyramid(nn.Module):
 (`torch.load` state dict; `module.` / `backbone.` prefixes and `{"model": ...}` wrappers
 are handled), wrapped for `linear` or `upernet_*`, looped over seeds.
 
-Inputs are ImageNet-normalized (set `"normalize": "none"` in the config to get `[0, 1]`).
+Inputs are ImageNet-normalized by default. Use what your encoder was trained with, because a
+wrong choice is not detected and only lowers the score. `normalize` takes `"imagenet"`, `"none"`
+for `[0, 1]` images, or any callable on a `[3, H, W]` image in `[0, 1]`:
+
+```python
+from torchvision.transforms import Normalize
+
+aquabench.run(encoder, run_type="linear", normalize=Normalize(mean=(0.48, 0.46, 0.41), std=(0.27, 0.26, 0.28)))
+```
+
+A callable is stored by name in `config.json`, so pass it again to `aquabench.evaluate`. With
+DataLoader workers it must be picklable, which rules out lambdas on some platforms.
 The run folder is named after `encoder_name=...`, else `encoder.name`, else the class name.
 
 ## Protocol
@@ -114,18 +125,24 @@ The run folder is named after `encoder_name=...`, else `encoder.name`, else the 
 - **Training.** AdamW, cosine schedule, 50 epochs, effective batch 32
   (`batch_size` 16 × `grad_accum_steps` 2), bf16 autocast. Learning rate 1e-3 for
   `linear`, 1e-4 for both UPerNet run types.
+- **Fine-tuning warm-up** (`upernet_finetune` only). The encoder is frozen for the first epoch
+  (`freeze_encoder_epochs`), so the new head trains alone. Its learning rate then ramps up
+  linearly over 2 epochs (`encoder_warmup_epochs`) to `encoder_lr_scale` = 0.1 of the head's
+  (1e-5), and follows the same cosine schedule. `linear` and `upernet_frozen` train only a new
+  head and have no warm-up.
 - **Augmentation.** Zoom-in only: random scale in [1.0, 1.5], random crop back to size,
-  random horizontal flip. No padding. Off for `linear` / `upernet_frozen`, on for
+  random horizontal flip. No padding. Off for `linear`, on for `upernet_frozen` and
   `upernet_finetune`; override with `augment=True/False`.
 - **Reported number.** Test mIoU over **all classes including background**, from the
   **last epoch**. Val is only logged, never used for checkpoint selection.
 
 Defaults ship in [`aquabench/configs/`](aquabench/configs) (one JSON per run type).
-Override any key with a dict or a JSON file:
+Override any key with a dict or a JSON file. `augment`, `batch_size`, `grad_accum_steps` and
+`normalize` are also arguments, and these win over the config:
 
 ```python
 aquabench.run(encoder, run_type="upernet_finetune", seed=0, patch_size=14,
-              config="my_finetune.json")          # or config={"batch_size": 8, "grad_accum_steps": 4}
+              config="my_finetune.json", batch_size=8, grad_accum_steps=4)
 ```
 
 ## Outputs

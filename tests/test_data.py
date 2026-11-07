@@ -113,10 +113,43 @@ def test_patch14_keeps_token_count(data_root):
 
 
 def test_augment_defaults_per_run_type():
-    """Augmentation is off / off / on for linear / upernet_frozen / upernet_finetune; override works."""
-    assert [default_config(r)["augment"] for r in ("linear", "upernet_frozen", "upernet_finetune")] == [False, False, True]
+    """Augmentation is off / on / on for linear / upernet_frozen / upernet_finetune; override works."""
+    assert [default_config(r)["augment"] for r in ("linear", "upernet_frozen", "upernet_finetune")] == [False, True, True]
     assert load_config("linear", augment=True)["augment"] is True
     assert load_config("upernet_finetune", augment=False)["augment"] is False
+
+
+def test_batch_arguments_override_config():
+    """batch_size and grad_accum_steps arguments win over the config; invalid values are rejected."""
+    cfg = load_config("linear", {"batch_size": 8, "grad_accum_steps": 4}, batch_size=4, grad_accum_steps=8)
+    assert (cfg["batch_size"], cfg["grad_accum_steps"]) == (4, 8)
+    assert load_config("linear", {"batch_size": 8})["batch_size"] == 8
+    with pytest.raises(ValueError, match="batch_size must be"):
+        load_config("linear", batch_size=0)
+    with pytest.raises(ValueError, match="grad_accum_steps must be"):
+        load_config("linear", grad_accum_steps=0)
+
+
+def test_normalize_options(data_root):
+    """imagenet, none and a callable all work on the [0, 1] image; anything else is rejected."""
+    raw, _ = SegDataset(data_root / "Toy", "test", normalize="none")[0]
+    assert raw.min() >= 0 and raw.max() <= 1
+    img, _ = SegDataset(data_root / "Toy", "test", normalize="imagenet")[0]
+    assert img.min() < 0
+    doubled, _ = SegDataset(data_root / "Toy", "test", normalize=lambda x: x * 2)[0]
+    assert torch.equal(doubled, raw * 2)
+    with pytest.raises(ValueError, match="a callable, got 'clip'"):
+        SegDataset(data_root / "Toy", "test", normalize="clip")
+    with pytest.raises(ValueError, match="a callable, got 'clip'"):
+        load_config("linear", {"normalize": "clip"})
+
+
+def test_normalize_callable_must_keep_the_shape(data_root):
+    """A callable that changes the shape or returns no tensor fails with a clear message."""
+    with pytest.raises(ValueError, match="must return a tensor of shape"):
+        SegDataset(data_root / "Toy", "test", normalize=lambda x: x[0])[0]
+    with pytest.raises(ValueError, match="got float"):
+        SegDataset(data_root / "Toy", "test", normalize=lambda x: 1.0)[0]
 
 
 def test_no_augment_is_deterministic(data_root):

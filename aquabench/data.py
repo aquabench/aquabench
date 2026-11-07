@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Tuple, Union
+from typing import Callable, Dict, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
 import torch
@@ -65,6 +65,11 @@ META_KEYS = ("num_classes", "ignore_index", "size")
 
 IMAGENET_MEAN = (0.485, 0.456, 0.406)
 IMAGENET_STD = (0.229, 0.224, 0.225)
+
+#: "imagenet", "none" ([0, 1] images), or a callable mapping a [3, H, W] image in [0, 1] to the
+#: encoder's input. With DataLoader workers it must be picklable (a module-level function or an
+#: object such as torchvision's Normalize).
+Normalize = Union[str, Callable[[torch.Tensor], torch.Tensor]]
 
 #: Zoom-in range for augmentation. Scales < 1 are never used, so nothing is padded.
 AUGMENT_SCALE = (1.0, 1.5)
@@ -217,6 +222,15 @@ def invalid_mask_values(mask: np.ndarray, meta: dict) -> List[int]:
 
 # --------------------------------------------------------------------------- transforms
 
+def normalize_label(normalize: Normalize) -> str:
+    """The JSON-safe name of a normalization, for ``config.json`` and checkpoints."""
+    if callable(normalize):
+        return f"callable:{getattr(normalize, '__qualname__', None) or repr(normalize)}"
+    if normalize not in ("imagenet", "none"):
+        raise ValueError(f"normalize must be 'imagenet', 'none' or a callable, got {normalize!r}")
+    return normalize
+
+
 def _resize_image(img: torch.Tensor, size: Sequence[int]) -> torch.Tensor:
     if tuple(img.shape[-2:]) == tuple(size):
         return img
@@ -256,14 +270,13 @@ class SegDataset(Dataset):
     """
 
     def __init__(self, ds_dir: Union[str, Path], split: str, patch_size: int = 16,
-                 augment: bool = False, normalize: str = "imagenet"):
+                 augment: bool = False, normalize: Normalize = "imagenet"):
         self.dir = Path(ds_dir)
         self.meta = load_meta(self.dir)
         self.size = tuple(self.meta["size"])
         self.input_size = input_size(self.size, patch_size)
         self.augment = augment
-        if normalize not in ("imagenet", "none"):
-            raise ValueError(f"normalize must be 'imagenet' or 'none', got {normalize!r}")
+        normalize_label(normalize)  # validates
         self.normalize = normalize
         self.pairs = list_pairs(self.dir / split)
         self._mean = torch.tensor(IMAGENET_MEAN).view(3, 1, 1)
@@ -281,7 +294,13 @@ class SegDataset(Dataset):
         if self.augment:
             img, mask = augment_pair(img, mask)
         img = _resize_image(img, self.input_size)
-        if self.normalize == "imagenet":
+        if callable(self.normalize):
+            out = self.normalize(img)
+            if not isinstance(out, torch.Tensor) or out.shape != img.shape:
+                raise ValueError(f"normalize callable must return a tensor of shape {list(img.shape)}, "
+                                 f"got {list(out.shape) if isinstance(out, torch.Tensor) else type(out).__name__}")
+            img = out
+        elif self.normalize == "imagenet":
             img = (img - self._mean) / self._std
         return img, mask
 

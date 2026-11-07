@@ -1,6 +1,7 @@
 """Run types, encoder contract, freezing, logging, seeds, grad accumulation."""
 
 import copy
+import math
 
 import pytest
 import torch
@@ -161,3 +162,63 @@ def test_all_run_types_50_epochs():
         cfg = default_config(rt)
         assert cfg["epochs"] == 50
         assert cfg["batch_size"] * cfg["grad_accum_steps"] == 32
+
+
+def test_lr_factors():
+    """Head: plain cosine. Encoder: 0 while frozen, linear ramp, then the same cosine."""
+    from aquabench.train import lr_factors
+
+    head, enc = lr_factors(10, "cosine", freeze_epochs=1, warmup_epochs=2)
+    assert head(0) == 1.0 and head(5) == pytest.approx(0.5)
+    assert enc(0) == 0.0
+    assert enc(1) == pytest.approx(0.5 * head(1)) and enc(2) == pytest.approx(head(2)) and enc(7) == head(7)
+    head, enc = lr_factors(10, "none")
+    assert head(3) == enc(3) == 1.0
+
+
+def test_finetune_warmup_defaults_and_validation():
+    """Only upernet_finetune has warm-up settings; impossible values are rejected."""
+    from aquabench.config import load_config
+
+    cfg = default_config("upernet_finetune")
+    assert (cfg["encoder_lr_scale"], cfg["freeze_encoder_epochs"], cfg["encoder_warmup_epochs"]) == (0.1, 1, 2)
+    for rt in ("linear", "upernet_frozen"):
+        assert "freeze_encoder_epochs" not in default_config(rt)
+        with pytest.raises(ValueError, match="Unknown config keys"):
+            load_config(rt, {"freeze_encoder_epochs": 1})
+    with pytest.raises(ValueError, match="never trains"):
+        load_config("upernet_finetune", {"epochs": 2, "freeze_encoder_epochs": 2})
+    with pytest.raises(ValueError, match="encoder_lr_scale"):
+        load_config("upernet_finetune", {"encoder_lr_scale": 0})
+
+
+class SnapshotLogger(ListLogger):
+    """Keeps a copy of the encoder weights and buffers at the end of each epoch."""
+
+    def __init__(self, encoder):
+        super().__init__()
+        self.encoder, self.snapshots = encoder, {}
+
+    def log(self, metrics, step):
+        super().log(metrics, step)
+        if "Toy/epoch" in metrics:
+            self.snapshots[metrics["Toy/epoch"]] = copy.deepcopy(self.encoder.state_dict())
+
+
+def test_finetune_freezes_then_trains_the_encoder(data_root, tmp_path):
+    """Epoch 1 leaves the encoder (weights and BatchNorm statistics) untouched; later epochs train it."""
+    enc = tiny_encoder("upernet_finetune")
+    before = copy.deepcopy(enc.state_dict())
+    logger = SnapshotLogger(enc)
+    _run(enc, "upernet_finetune", data_root, tmp_path, logger=logger, config={**FAST, "epochs": 3})
+    assert all(torch.equal(before[k], logger.snapshots[1][k]) for k in before)
+    assert any(not torch.equal(before[k], logger.snapshots[3][k]) for k in before)
+    enc_lr = [m["Toy/train/encoder_lr"] for _, m in logger.records if "Toy/train/encoder_lr" in m]
+    # epoch 2 (index 1): half the ramp times the cosine factor; epoch 3 is lower again
+    assert enc_lr[0] == 0.0 and max(enc_lr) == pytest.approx(1e-5 * 0.5 * 0.5 * (1 + math.cos(math.pi / 3)))
+
+
+def test_frozen_run_types_have_one_learning_rate(data_root, tmp_path):
+    logger = ListLogger()
+    _run(tiny_encoder("upernet_frozen"), "upernet_frozen", data_root, tmp_path, logger=logger)
+    assert "Toy/train/lr" in logger.keys() and "Toy/train/encoder_lr" not in logger.keys()

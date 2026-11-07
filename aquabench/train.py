@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import random
 from typing import Callable, List, Optional, Tuple
 
@@ -17,6 +18,25 @@ def seed_everything(seed: int) -> None:
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
+
+
+def lr_factors(epochs: int, scheduler: str, freeze_epochs: int = 0,
+               warmup_epochs: int = 0) -> Tuple[Callable[[int], float], Callable[[int], float]]:
+    """Per-epoch learning-rate factors for the head and the encoder (epoch counted from 0).
+
+    The head follows the cosine schedule. The encoder gets 0 while frozen, then ramps up
+    linearly over ``warmup_epochs``, and follows the same cosine after that.
+    """
+    def head(e: int) -> float:
+        return 0.5 * (1 + math.cos(math.pi * e / epochs)) if scheduler == "cosine" else 1.0
+
+    def encoder(e: int) -> float:
+        if e < freeze_epochs:
+            return 0.0
+        ramp = min(1.0, (e - freeze_epochs + 1) / warmup_epochs) if warmup_epochs else 1.0
+        return ramp * head(e)
+
+    return head, encoder
 
 
 def autocast(device: torch.device, precision: str):
