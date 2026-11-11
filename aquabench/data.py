@@ -240,7 +240,7 @@ def _resize_image(img: torch.Tensor, size: Sequence[int]) -> torch.Tensor:
 def _resize_mask(mask: torch.Tensor, size: Sequence[int]) -> torch.Tensor:
     if tuple(mask.shape[-2:]) == tuple(size):
         return mask
-    return F.interpolate(mask[None, None].float(), size=tuple(size), mode="nearest")[0, 0].long()
+    return F.interpolate(mask[None, None].float(), size=tuple(size), mode="nearest-exact")[0, 0].long()
 
 
 def augment_pair(img: torch.Tensor, mask: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:

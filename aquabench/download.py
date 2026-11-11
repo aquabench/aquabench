@@ -56,7 +56,7 @@ def write_dataset(out_dir: Union[str, Path], meta: dict,
             if mask.max(initial=0) > 255:
                 raise ValueError(f"{meta['name']}/{split}/{i}: mask value > 255 cannot be stored as uint8 PNG")
             img.convert("RGB").save(tmp / split / "images" / f"{i:06d}.png")
-            Image.fromarray(mask.astype(np.uint8), mode="L").save(tmp / split / "masks" / f"{i:06d}.png")
+            Image.fromarray(mask.astype(np.uint8)).save(tmp / split / "masks" / f"{i:06d}.png")
     (tmp / "meta.json").write_text(json.dumps(meta, indent=2) + "\n")
     shutil.rmtree(out_dir, ignore_errors=True)
     tmp.rename(out_dir)

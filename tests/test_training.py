@@ -61,7 +61,7 @@ def test_cnn_pyramid_uses_its_total_stride(data_root, tmp_path):
     res = _run(CnnPyramid(), "upernet_frozen", data_root, tmp_path, patch_size=32)
     assert 0.0 <= res["Toy"].test_miou <= 1.0
     with pytest.raises(aquabench.EncoderContractError, match="total stride"):
-        _run(CnnPyramid(), "upernet_frozen", data_root, tmp_path)
+        _run(CnnPyramid(), "upernet_frozen", data_root, tmp_path / "default")
 
 
 def test_bad_second_dataset_stops_the_run_before_training(data_root, tmp_path):
@@ -222,3 +222,80 @@ def test_frozen_run_types_have_one_learning_rate(data_root, tmp_path):
     logger = ListLogger()
     _run(tiny_encoder("upernet_frozen"), "upernet_frozen", data_root, tmp_path, logger=logger)
     assert "Toy/train/lr" in logger.keys() and "Toy/train/encoder_lr" not in logger.keys()
+
+
+class NoGradEncoder(nn.Module):
+    """Follows the output contract, but cuts the gradient."""
+
+    def __init__(self):
+        super().__init__()
+        self.inner = tiny_encoder("upernet_finetune")
+
+    def forward(self, x):
+        with torch.no_grad():
+            return self.inner(x)
+
+
+class NoParameters(nn.Module):
+    def forward(self, x):
+        return [torch.nn.functional.avg_pool2d(x, 16)] * 4
+
+
+def test_finetune_needs_an_encoder_that_can_be_trained(data_root, tmp_path):
+    """Full fine-tuning: an encoder that detaches its outputs or has no weights is rejected at
+    the start; the same encoder is fine for upernet_frozen."""
+    with pytest.raises(aquabench.EncoderContractError, match="carry no gradient"):
+        _run(NoGradEncoder(), "upernet_finetune", data_root, tmp_path)
+    with pytest.raises(aquabench.EncoderContractError, match="has no parameters"):
+        _run(NoParameters(), "upernet_finetune", data_root, tmp_path)
+    assert 0.0 <= _run(NoGradEncoder(), "upernet_frozen", data_root, tmp_path)["Toy"].test_miou <= 1.0
+
+
+def test_finetune_trains_parameters_the_caller_froze(data_root, tmp_path):
+    """Every parameter is trained whatever its requires_grad flag, and the flag is restored."""
+    enc = tiny_encoder("upernet_finetune")
+    enc.patch.weight.requires_grad_(False)
+    before = enc.patch.weight.detach().clone()
+    res = _run(enc, "upernet_finetune", data_root, tmp_path)
+    assert not torch.equal(before, enc.patch.weight)
+    assert enc.patch.weight.requires_grad is False
+    info = res["Toy"].run_info["encoder"]
+    assert info["trained_parameters"] == info["parameters"] == sum(p.numel() for p in enc.parameters())
+
+
+def test_linear_caches_features_and_gives_the_same_result(data_root, tmp_path):
+    """Features computed once give the result of running the encoder every epoch, and the
+    cache folder is gone afterwards."""
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    cached = _run(tiny_encoder("linear"), "linear", data_root, tmp_path / "a", cache_dir=cache)
+    plain = _run(tiny_encoder("linear"), "linear", data_root, tmp_path / "b", config={**FAST, "cache_features": False})
+    assert cached.run_info["features_cached"] is True and plain.run_info["features_cached"] is False
+    assert cached.test_miou == pytest.approx(plain.test_miou, abs=1e-6)
+    assert cached.val_miou_last == pytest.approx(plain.val_miou_last, abs=1e-6)
+    assert list(cache.iterdir()) == []
+
+
+def test_cache_runs_the_encoder_once_per_sample(data_root, tmp_path):
+    """8 train + 4 val + 4 test images and the probe: 17 images in total, whatever the epochs."""
+    enc, seen = tiny_encoder("linear"), []
+    enc.register_forward_hook(lambda m, inputs, out: seen.append(len(inputs[0])))
+    _run(enc, "linear", data_root, tmp_path, config={**FAST, "epochs": 3})
+    assert sum(seen) == 17
+
+
+def test_augmentation_turns_the_cache_off(data_root, tmp_path):
+    assert _run(tiny_encoder("linear"), "linear", data_root, tmp_path, augment=True).run_info["features_cached"] is False
+
+
+def test_cache_without_space_falls_back(data_root, tmp_path, monkeypatch):
+    """A full cache folder gives a warning and a normal run, not a crash."""
+    import aquabench.cache
+
+    def full(*args, **kwargs):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(aquabench.cache, "_create", full)
+    with pytest.warns(UserWarning, match="features not cached"):
+        res = _run(tiny_encoder("linear"), "linear", data_root, tmp_path)
+    assert res.run_info["features_cached"] is False and 0.0 <= res.test_miou <= 1.0

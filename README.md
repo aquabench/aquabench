@@ -77,8 +77,22 @@ AQUABENCH does no encoder handling: no model zoo, no weight loading, no layer se
 | run type | encoder | `encoder.forward(x)` must return | head |
 |---|---|---|---|
 | `linear` | frozen | one tensor `[B, C, h, w]` | BatchNorm + 1×1 conv |
-| `upernet_frozen` | frozen | list of 4 tensors `[B, C_i, h_i, w_i]` | UPerNet (PPM + FPN) |
-| `upernet_finetune` | trained | list of 4 tensors `[B, C_i, h_i, w_i]` | UPerNet (PPM + FPN) |
+| `upernet_frozen` | frozen | a list of 4 tensors `[B, C_i, h_i, w_i]` | UPerNet (PPM + FPN) |
+| `upernet_finetune` | fully trained | a list of 4 tensors `[B, C_i, h_i, w_i]` | UPerNet (PPM + FPN) |
+
+For both UPerNet run types, `forward` returns a Python list (or tuple) of exactly 4 separate
+tensors, shallow to deep: `[f1, f2, f3, f4]`. They are not stacked into one 5D tensor and not
+concatenated, because a CNN's 4 maps differ in channels and size.
+
+`upernet_finetune` is full fine-tuning. The encoder must offer three things:
+
+- It has parameters, and all of them are trained, whatever their `requires_grad` flag. The flags
+  are restored after the run; the weights are changed in place.
+- Its `forward` lets gradients through: no `torch.no_grad()` and no `.detach()` on the 4 maps.
+- It respects `train()` and `eval()`: it is in eval mode while frozen in the first epoch and for
+  validation and testing, and in train mode otherwise.
+
+The first two are checked before training.
 
 The output is checked on a dummy image before training; a mismatch raises
 `aquabench.EncoderContractError` with a clear message. This includes the token grid: the
@@ -134,7 +148,16 @@ The run folder is named after `encoder_name=...`, else `encoder.name`, else the 
   random horizontal flip. No padding. Off for `linear`, on for `upernet_frozen` and
   `upernet_finetune`; override with `augment=True/False`.
 - **Reported number.** Test mIoU over **all classes including background**, from the
-  **last epoch**. Val is only logged, never used for checkpoint selection.
+  **last epoch**. Val is only logged, never used for checkpoint selection. The mIoU is the sum
+  of the class IoUs divided by the dataset's number of classes, so every model is averaged over
+  the same classes; a class that is absent from the test masks and never predicted adds 0.
+- **Masks** are resized with `nearest-exact`.
+- **Cached features** (`linear` only). Without augmentation the frozen encoder gives the same
+  features every epoch, so each image is encoded once, stored in `cache_dir` (default: the
+  system temp folder) and deleted after the run. The size is logged as `<Dataset>/cache/gb`; it
+  can reach tens of GB for large encoders, so point `cache_dir` at local scratch. If the space
+  is missing, the run warns and encodes every epoch instead. `"cache_features": false` turns
+  it off.
 
 Defaults ship in [`aquabench/configs/`](aquabench/configs) (one JSON per run type).
 Override any key with a dict or a JSON file. `augment`, `batch_size`, `grad_accum_steps` and
@@ -153,10 +176,15 @@ Each dataset gets its own run folder under `output_dir` (default `runs/`):
 runs/<encoder_name>/<run_type>/<dataset>_seed<seed>/
   config.json      # effective config
   history.json     # per-epoch train loss and val mIoU
-  result.json      # test mIoU, per-class IoU, last val mIoU, runtime, version
+  result.json      # test mIoU, per-class IoU, last val mIoU, runtime, version, run_info
   checkpoint.pt    # head (+ encoder weights for upernet_finetune)
 ```
 
+- `run_info` in `result.json` records what ran: the encoder's class, parameter count and feature
+  map shapes, the dataset's classes, sizes and samples per split, and the torch version, device
+  and start time.
+- A run folder that already holds a `result.json` is not replaced: `run` raises
+  `FileExistsError` before training unless you pass `overwrite=True`.
 - `checkpoint_dir=...` puts only the checkpoints under another root (e.g. scratch).
 - `save_checkpoint=False` writes no checkpoint (large sweeps); `evaluate` is then not possible.
 
@@ -198,6 +226,7 @@ aquabench/
   heads.py      # encoder contract, LinearHead, UPerNetHead
   data.py       # on-disk layout, token-grid sizing, augmentation
   metrics.py    # confusion-matrix mIoU
+  cache.py      # frozen features computed once (linear)
   config.py     # default + user config
   configs/      # linear.json, upernet_frozen.json, upernet_finetune.json
   loggers.py    # Logger protocol, PrintLogger

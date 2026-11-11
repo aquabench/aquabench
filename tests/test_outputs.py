@@ -116,3 +116,30 @@ def test_evaluate_warns_on_different_frozen_encoder(data_root, tmp_path):
     with pytest.warns(UserWarning, match="weights differ"):
         aquabench.evaluate(tiny_encoder("linear", seed=123), tmp_path / "runs" / "tiny" / "linear" / "Toy_seed0",
                            data_root=data_root, device="cpu", logger=ListLogger())
+
+
+def test_run_info_is_saved(data_root, tmp_path):
+    """result.json says what ran: encoder class and size, dataset, environment."""
+    import torch
+
+    enc = tiny_encoder("upernet_frozen")
+    _run(enc, "upernet_frozen", data_root, tmp_path / "runs", seed=4)
+    saved = json.loads((tmp_path / "runs" / "tiny" / "upernet_frozen" / "Toy_seed4" / "result.json").read_text())
+    info = saved["run_info"]
+    assert saved["seed"] == 4 and saved["run_type"] == "upernet_frozen"
+    assert info["encoder"] == {"class": "conftest.TinyEncoder", "parameters": sum(p.numel() for p in enc.parameters()),
+                               "trained_parameters": 0, "feature_maps": [[8, 4, 4]] * 4}
+    assert info["dataset"] == {"name": "Toy", "num_classes": 3, "ignore_index": 255, "size": [64, 64],
+                               "token_grid": [4, 4], "input_size": [64, 64],
+                               "samples": {"train": 8, "val": 4, "test": 4}}
+    assert info["environment"]["torch"] == torch.__version__ and info["environment"]["device"] == "cpu"
+    assert info["features_cached"] is False
+
+
+def test_finished_run_is_not_overwritten(data_root, tmp_path):
+    """A second run into a finished folder raises before training, unless overwrite=True."""
+    first = _run(tiny_encoder("linear"), "linear", data_root, tmp_path / "runs")
+    with pytest.raises(FileExistsError, match="overwrite=True"):
+        _run(tiny_encoder("linear"), "linear", data_root, tmp_path / "runs")
+    again = _run(tiny_encoder("linear"), "linear", data_root, tmp_path / "runs", overwrite=True)
+    assert again.test_miou == first.test_miou

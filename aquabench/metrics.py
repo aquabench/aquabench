@@ -1,4 +1,4 @@
-"""Confusion-matrix mIoU over all classes (background included)."""
+"""Confusion-matrix mIoU over all of a dataset's classes (background included)."""
 
 from __future__ import annotations
 
@@ -17,13 +17,13 @@ def confusion_matrix(pred: torch.Tensor, target: torch.Tensor, num_classes: int,
 
 
 def iou_from_confusion(cm: torch.Tensor) -> Tuple[float, List[float]]:
-    """(mIoU, per-class IoU). A class with an empty union (absent in GT and prediction)
-    gets NaN and is left out of the mean."""
+    """(mIoU, per-class IoU). The mIoU is the sum of the class IoUs divided by the dataset's
+    number of classes, so every model is averaged over the same classes. A class with an empty
+    union (absent in GT and prediction) gets NaN in the per-class list and adds 0 to the sum."""
     cm = cm.double()
     tp = cm.diag()
     union = cm.sum(0) + cm.sum(1) - tp
     iou = torch.where(union > 0, tp / union.clamp(min=1), torch.full_like(tp, float("nan")))
-    present = ~torch.isnan(iou)
-    miou = iou[present].mean().item() if present.any() else float("nan")
+    miou = (torch.nan_to_num(iou, nan=0.0).sum() / len(iou)).item()
     return miou, iou.tolist()
 
